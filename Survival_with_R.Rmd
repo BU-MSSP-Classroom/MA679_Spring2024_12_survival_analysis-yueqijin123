@@ -321,24 +321,25 @@ This exercise focuses on the brain tumor data, which is included in the ISLR2 R 
 ```{r}
 library(ISLR2)
 attach(BrainCancer)
+
+library(survival)
+library(survminer)
 ```
 
 (a) Plot the Kaplan-Meier survival curve with ±1 standard error
 bands, using the survfit() function in the survival package.
 
 ```{r,echo=TRUE}
-#
-#
+km_fit <- survfit(Surv(time, status) ~ 1, data = BrainCancer)
+ggsurvplot(km_fit,
+           conf.int = TRUE,  # Show the confidence interval
+           risk.table = TRUE,  # Show risk table
+           xlab = "Time (days)",
+           ylab = "Survival Probability",
+           ggtheme = theme_minimal(),  # Use minimal theme
+           title = "Kaplan-Meier Survival Curve with ±1 Standard Error Bands")
 ```
 
-
-Your answer:
-
-~~~
-Please write your answer in full sentences.
-
-
-~~~
 
 (b) Draw a bootstrap sample of size n = 88 from the pairs (yi, δi),
 and compute the resulting Kaplan-Meier survival curve. Repeat
@@ -347,36 +348,106 @@ of the standard error of the Kaplan-Meier survival curve at each
 timepoint. Compare this to the standard errors obtained in (a).
 
 ```{r,echo=TRUE}
-#
-#
+
+library(survival)
+library(boot)
+
+# Kaplan-Meier estimator function in R
+kaplan_meier_estimator <- function(event_times, censored, timeline=NULL) {
+  if (is.null(timeline)) {
+    timeline <- unique(event_times)
+  }
+  
+  times_and_events <- data.frame(event_times, censored)
+  times_and_events <- times_and_events[order(times_and_events$event_times),]
+  survival_prob <- c(1)
+  standard_errors <- c(0)
+  
+  for (time in timeline) {
+    at_risk <- sum(times_and_events$event_times >= time)
+    events <- sum(times_and_events$event_times == time & times_and_events$censored == 1)
+    if (at_risk > 0) {
+      survival_prob <- c(survival_prob, survival_prob[length(survival_prob)] * (1 - events / at_risk))
+      variance <- ifelse(at_risk > events, 
+                         survival_prob[length(survival_prob)]^2 * events / (at_risk * (at_risk - events)), 
+                         0)
+      standard_errors <- c(standard_errors, sqrt(variance + standard_errors[length(standard_errors)]^2))
+    } else {
+      survival_prob <- c(survival_prob, tail(survival_prob, 1))
+      standard_errors <- c(standard_errors, tail(standard_errors, 1))
+    }
+  }
+  
+  return(list(time = timeline, survival_prob = survival_prob[-1], standard_errors = standard_errors[-1]))
+}
+
+# Bootstrap function for the Kaplan-Meier estimator
+bootstrap_km <- function(data, n_bootstrap = 200) {
+  timeline <- unique(data$time)
+  bootstrap_survival_functions <- matrix(nrow = n_bootstrap, ncol = length(timeline))
+  
+  for (i in 1:n_bootstrap) {
+    bootstrap_sample <- data[sample(1:nrow(data), replace = TRUE), ]
+    
+    km_result <- kaplan_meier_estimator(
+      bootstrap_sample$time,
+      bootstrap_sample$status,
+      timeline = timeline
+    )
+    
+    bootstrap_survival_functions[i, ] <- km_result$survival_prob
+  }
+  
+  bootstrap_standard_errors <- apply(bootstrap_survival_functions, 2, sd)
+  return(bootstrap_standard_errors)
+}
+
+km_result <- kaplan_meier_estimator(BrainCancer$time, BrainCancer$status)
+timeline <- km_result$time
+
+
+bootstrap_std_errors <- bootstrap_km(BrainCancer)
+bootstrap_std_errors[1:5]
+
 ```
 
 
-Your answer:
-
-~~~
-Please write your answer in full sentences.
-
-
-~~~
 
 (c) Fit a Cox proportional hazards model that uses all of the predictors
 to predict survival. Summarize the main findings.
-
-
 ```{r,echo=TRUE}
-#
-#
+brain_cancer_data_dummy <- as.data.frame(model.matrix(~ . - 1, data = BrainCancer))
+
+cox_model <- coxph(Surv(time, status) ~ ., data = brain_cancer_data_dummy)
+summary(cox_model)
+BrainCancer <- BrainCancer %>%
+  mutate(strata = ifelse(ki == 40, 60, ki))
+
+unique_strata <- unique(BrainCancer$strata)
+km_plots_list <- list()
+for (ki_value in unique_strata) {
+  mask <- BrainCancer$strata == ki_value
+  km_fit <- survfit(Surv(time, status) ~ 1, data = BrainCancer[mask, ])
+
+  km_plots_list[[as.character(ki_value)]] <- ggsurvplot(
+    km_fit,
+    data = BrainCancer[mask, ],
+    conf.int = TRUE, # Show confidence interval
+    pval = TRUE, # Show p-value of log-rank test
+    xlab = "Time",
+    ylab = "Survival probability",
+    title = sprintf("Kaplan-Meier Survival Curves for ki = %s", ki_value),
+    ggtheme = theme_minimal()
+  )
+}
+
+for (plot in km_plots_list) {
+  print(plot)
+}
+
 ```
 
 
-Your answer:
-
-~~~
-Please write your answer in full sentences.
-
-
-~~~
 
 (d) Stratify the data by the value of ki. (Since only one observation
 has ki=40, you can group that observation together with the observations
@@ -384,18 +455,48 @@ that have ki=60.) Plot Kaplan-Meier survival curves
 for each of the five strata, adjusted for the other predictors.
 
 ```{r,echo=TRUE}
-#
-#
+compute_survival_curve <- function(data) {
+  data_sorted <- data[order(data$time),]
+  times <- data_sorted$time
+  events <- data_sorted$status
+  
+  survival_prob <- 1.0
+  survival_curve <- data.frame(time=numeric(), survival_prob=numeric())
+  
+  for (time in unique(times)) {
+    at_risk <- sum(times >= time)
+    events_at_time <- sum(times == time & events == 1)
+    survival_prob <- survival_prob * (1 - events_at_time / at_risk)
+    survival_curve <- rbind(survival_curve, data.frame(time=time, survival_prob=survival_prob))
+  }
+  return(survival_curve)
+}
+
+# Adjusting 'ki' values in the dataset
+BrainCancer$ki_adj <- ifelse(BrainCancer$ki == 40, 60, BrainCancer$ki)
+
+# Plotting Kaplan-Meier survival curves stratified by ki value
+plot_list <- list()
+
+for (ki_value in unique(BrainCancer$ki_adj)) {
+  stratum_data <- BrainCancer[BrainCancer$ki_adj == ki_value, ]
+  survival_curve <- compute_survival_curve(stratum_data)
+  
+  plot_list[[as.character(ki_value)]] <- plot(survival_curve$time, survival_curve$survival_prob,
+                                             type = 's', # step function
+                                             xlab = 'Time', ylab = 'Survival Probability',
+                                             main = paste('Kaplan-Meier Survival Curves Stratified by ki Value'),
+                                             col = rainbow(length(unique(BrainCancer$ki_adj)))[ki_value])
+  lines(survival_curve$time, survival_curve$survival_prob, col = rainbow(length(unique(BrainCancer$ki_adj)))[ki_value])
+}
+
+par(mfrow=c(1, 1))  
+for (plot in plot_list) {
+  print(plot)
+}
+
 ```
 
-
-Your answer:
-
-~~~
-Please write your answer in full sentences.
-
-
-~~~
 
 ### Censoring
 
@@ -418,18 +519,35 @@ there appear to be a difference between the two groups’ survival
 curves?
 
 ```{r,echo=TRUE}
-#
-#
+
+data <- read.table(header=TRUE, text="
+Y Censoring X
+26.5 1 0.1
+37.2 1 11
+57.3 1 -0.3
+90.8 0 2.8
+20.2 0 1.8
+89.8 0 0.4
+")
+
+
+data$group <- ifelse(data$X < 2, 'Group 1', 'Group 2')
+km_fit <- survfit(Surv(Y, Censoring) ~ group, data=data)
+
+plot<- ggsurvplot(
+  km_fit,
+  data = data,
+  pval = TRUE,
+  risk.table = TRUE,
+  ggtheme = theme_minimal(),
+  palette = c("#E7B800", "#2E9FDF"),
+  conf.int = TRUE
+)
+
+
+print(plot)
+
 ```
-
-
-Your answer:
-
-~~~
-Please write your answer in full sentences.
-
-
-~~~
 
 (b) Fit Cox’s proportional hazards model, using the group indicator
 as a covariate. What is the estimated coefficient? Write a sentence
@@ -438,18 +556,26 @@ of the hazard or the instantaneous probability of the event. Is
 there evidence that the true coefficient value is non-zero?
 
 ```{r,echo=TRUE}
-#
-#
+
+data$group_indicator <- ifelse(data$X < 2, 0, 1)  # 0 for Group 1, 1 for Group 2
+
+cox_model <- coxph(Surv(Y, Censoring) ~ group_indicator, data=data)
+summary_cox <- summary(cox_model)
+print(summary_cox)
+
+coef_estimated <- summary_cox$coefficients[1]
+exp_coef <- exp(coef_estimated)
+
+if (summary_cox$coefficients[5] < 0.05) {
+  evidence <- "is"
+} else {
+  evidence <- "is not"
+}
+
+sentence <- sprintf("The estimated coefficient for the group indicator is %f. This means that the hazard for Group 2 is %f times that of Group 1, holding all other variables constant. There %s evidence at the 5%% significance level that the true coefficient value is non-zero, based on the p-value.", coef_estimated, exp_coef, evidence)
+print(sentence)
+
 ```
-
-
-Your answer:
-
-~~~
-Please write your answer in full sentences.
-
-
-~~~
 
 (c) Recall from Section 11.5.2 that in the case of a single binary
 covariate, the log-rank test statistic should be identical to the
@@ -460,18 +586,16 @@ statistic compare to the p-value for the score statistic for the
 Cox model from (b)?
 
 ```{r,echo=TRUE}
-#
-#
+
+group_1 <- subset(data, group_indicator == 0)
+group_2 <- subset(data, group_indicator == 1)
+
+# Perform the log-rank test
+ls <- survdiff(Surv(Observation, Censoring_Indicator) ~ group_indicator, data = data)
+p_value <- 1 - pchisq(ls$chisq, length(ls$n) - 1)
+print(p_value)
+
 ```
-
-
-Your answer:
-
-~~~
-Please write your answer in full sentences.
-
-
-~~~
 
 ## Additional Material
 
